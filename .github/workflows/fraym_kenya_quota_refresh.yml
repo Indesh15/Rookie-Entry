@@ -1,0 +1,72 @@
+name: Fraym Kenya Quota Refresh
+
+# Runs every 2 hours from 08:00 to 16:00 EAT (05:00–13:00 UTC), 7 days a week.
+# Each run is a full refresh — no incremental state between runs.
+on:
+  schedule:
+    - cron: '0 5,7,9,11,13 * * *'
+  workflow_dispatch:   # allows manual trigger from the Actions tab
+
+permissions:
+  contents: write      # needed to commit the post-run backup to the repo
+
+jobs:
+  refresh:
+    name: Refresh dashboard snapshot
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          # Use a PAT if branch-protection rules block GITHUB_TOKEN pushes.
+          # Otherwise GITHUB_TOKEN is sufficient for the backup commit.
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Write the MCP server config using the secret so the token is never
+      # visible in workflow YAML or logs.
+      - name: Write MCP config
+        run: |
+          python3 - <<'PYEOF'
+          import json, os
+          config = {
+            "mcpServers": {
+              "GeoPoll-Admin": {
+                "type": "http",
+                "url": "https://mcp.geopoll.com/mcp",
+                "headers": {
+                  "Authorization": "Bearer " + os.environ["GEOPOLL_MCP_TOKEN"]
+                }
+              }
+            }
+          }
+          with open("/tmp/mcp_config.json", "w") as f:
+              json.dump(config, f)
+          print("MCP config written.")
+          PYEOF
+        env:
+          GEOPOLL_MCP_TOKEN: ${{ secrets.GEOPOLL_MCP_TOKEN }}
+
+      - name: Run quota refresh via Claude Code
+        uses: anthropics/claude-code-action@beta
+        with:
+          prompt_file: tasks/fraym_kenya_quota_refresh.md
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          mcp_config: /tmp/mcp_config.json
+          # Restrict to exactly the tools this task needs.
+          allowed_tools: >-
+            Bash,
+            Read,
+            Write,
+            mcp__GeoPoll-Admin__artifact_get,
+            mcp__GeoPoll-Admin__artifact_get_upload_token,
+            mcp__GeoPoll-Admin__live_data_get_report_flat,
+            mcp__GeoPoll-Admin__outlook_send_email
+          timeout_minutes: 40
